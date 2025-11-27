@@ -1,0 +1,11 @@
+{
+    "profile_id": 1,
+    "row_count": 15,
+    "price_currency": "BRL",
+    "source_name": "Fake Store API",
+    "commit_hash": "6d3f8bfacbd30a1fe8680a15164ced93c15bbc5e",
+    "automation_status": "SUCCESS",
+    "environment": "dev",
+    "duration_seconds": 0.8157599059995846,
+    "timestamp": "27-11-2025 - 00:45:49"
+}
