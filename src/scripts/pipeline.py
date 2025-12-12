@@ -38,7 +38,7 @@ def generate_fake_data(products_list, data_folder):
     # 2 - Randomizar a quantidade de vezes que vai fazer a requisição (quantas ordens)
     order_qty = random.randint(1,3)
     
-    timestamp = (dt.now() - timedelta(hours=1)).strftime("%d-%m-%Y - %H:%M:%S")
+    timestamp = dt.now().strftime("%d-%m-%Y - %H:%M:%S")
     
     # 4 - Fazer uma busca pegando os Ids escolhidos e colocando os materiais num dataframe temporário
     
