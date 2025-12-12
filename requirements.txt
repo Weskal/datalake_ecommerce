@@ -3,3 +3,6 @@ sqlalchemy
 pytest
 requests
 polars
+pytz
+uuid
+psycopg2-binary

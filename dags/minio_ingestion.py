@@ -8,17 +8,21 @@ import sys
 import uuid
 import time
 import json
+import pytz
 from airflow.decorators import dag, task #type:ignore
 import requests
 #from scripts.pipeline import run_pipeline  # sua função já existente
 #from scripts.pipeline import generate_fake_data, meta_data, extract_data, send_to_minio
 import io
 
+PIPELINE_ID = 1
+
 SRC_PATH = "/opt/airflow/src"
 if SRC_PATH not in sys.path:
     sys.path.append(SRC_PATH)
 
 from utils.minio_connection import connect_minio
+from utils.postgre_connection import update_pipeline_status
 
 BUCKET = "bronze-layer"
 DATA_FOLDER = "/opt/airflow/data"
@@ -33,12 +37,30 @@ def orders_pipeline():
     
     @task
     def t_extract_data():
-        response = requests.get('https://fakestoreapi.com/products')
-        if response.status_code == 200:
-            products_list = response.json()
-        else:
-            products_list = []
-        return products_list
+        
+        try:
+            response = requests.get('https://fakestoreapi.com/products')
+            if response.status_code == 200:
+                products_list = response.json()
+            else:
+                products_list = []
+                
+            update_pipeline_status(
+                pipeline_id=PIPELINE_ID,
+                status='success',
+                task_name='t_extract_data',
+                step="1/5"
+            )
+        except Exception as e:
+            update_pipeline_status(
+            pipeline_id=PIPELINE_ID,
+            status='failed',
+            task_name='t_extract_data',
+            notes=str(e),
+            step="1/5"
+        )
+        finally:
+            return products_list
      
     @task
     def t_start_timer():
@@ -47,78 +69,98 @@ def orders_pipeline():
 
     @task
     def t_generate(products_list, data_folder):
-        # 1 - Definir um dataframe inicial, vazio, com as colunas definidas + coluna quantidade
-        columns = [
-            'order_id',
-            'product_id',
-            'product_title',
-            'price', # qty * price
-            'description',
-            'category',
-            'qty',
-            'created_at'
-        ]
-        df = pd.DataFrame(columns=columns)
         
-        # 2 - Randomizar a quantidade de vezes que vai fazer a requisição (quantas ordens)
-        order_qty = random.randint(1,3)
-        
-        timestamp = dt.now().strftime("%d-%m-%Y - %H:%M:%S")
-        
-        # 4 - Fazer uma busca pegando os Ids escolhidos e colocando os materiais num dataframe temporário
-        
-        rows = []
-        
-        for order in range(order_qty):
+        try:
+            # 1 - Definir um dataframe inicial, vazio, com as colunas definidas + coluna quantidade
+            columns = [
+                'order_id',
+                'product_id',
+                'product_title',
+                'price', # qty * price
+                'description',
+                'category',
+                'qty',
+                'created_at'
+            ]
+            df = pd.DataFrame(columns=columns)
             
-            order_id = str(uuid.uuid4())
+            # 2 - Randomizar a quantidade de vezes que vai fazer a requisição (quantas ordens)
+            order_qty = random.randint(1,3)
             
-            # 2.5 - Randomizar a quantidade de materiais por ordem
-            random_item_qty = random.randint(3,15)
+            tz = pytz.timezone('America/Sao_Paulo')
+            timestamp = dt.now(tz).strftime("%d-%m-%Y - %H:%M:%S")
             
-            # 3 - Randomizar quais IDs serão pegos (quais itens)
-            ids_to_get = random.sample(range(1,21),random_item_qty) # sort para aumentar a eficiência na busca?
+            # 4 - Fazer uma busca pegando os Ids escolhidos e colocando os materiais num dataframe temporário
+            
+            rows = []
+            
+            for order in range(order_qty):
+                
+                order_id = str(uuid.uuid4())
+                
+                # 2.5 - Randomizar a quantidade de materiais por ordem
+                random_item_qty = random.randint(3,15)
+                
+                # 3 - Randomizar quais IDs serão pegos (quais itens)
+                ids_to_get = random.sample(range(1,21),random_item_qty) # sort para aumentar a eficiência na busca?
 
-            for product in products_list:
-                if isinstance(product, dict) and 'id' in product:
-                    if product['id'] in ids_to_get:
-                        
-                        random_qty = random.randint(0,8)
-                        
-                        row = {
-                            'order_id': order_id,
-                            'product_id': product['id'],
-                            'product_title': product['title'],
-                            'price': product['price'],
-                            'description': product['description'],
-                            'category': product['category'],
-                            'qty': random_qty,
-                            'created_at': timestamp
-                        }
+                for product in products_list:
+                    if isinstance(product, dict) and 'id' in product:
+                        if product['id'] in ids_to_get:
+                            
+                            random_qty = random.randint(0,8)
+                            
+                            row = {
+                                'order_id': order_id,
+                                'product_id': product['id'],
+                                'product_title': product['title'],
+                                'price': product['price'],
+                                'description': product['description'],
+                                'category': product['category'],
+                                'qty': random_qty,
+                                'created_at': timestamp
+                            }
 
-                        rows.append(row)
+                            rows.append(row)
+                
+                temp_df = pd.DataFrame(rows, columns=columns)
+                
+            df = pd.concat([df, temp_df], ignore_index=True) 
             
-            temp_df = pd.DataFrame(rows, columns=columns)
+            # Gerar o nome do arquivo raw
             
-        df = pd.concat([df, temp_df], ignore_index=True) 
-        
-        # Gerar o nome do arquivo raw
-        
-        file_name = "orders_" + df["created_at"].unique()[0] 
-        
-        output_path = os.path.join(data_folder, "raw", file_name + ".parquet")
-        
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            file_name = "orders_" + df["created_at"].unique()[0] 
+            
+            output_path = os.path.join(data_folder, "raw", file_name + ".parquet")
+            
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-        # Saída Bronze
-        df.to_parquet(output_path, engine='pyarrow', compression='snappy')
+            # Saída Bronze
+            df.to_parquet(output_path, engine='pyarrow', compression='snappy')
             
-        return  {
-        'file_name': file_name,
-        'file_path': output_path,
-        'row_count': len(df),
-        'timestamp': timestamp
-        }
+            update_pipeline_status(
+                pipeline_id=PIPELINE_ID,
+                status='success',
+                task_name='t_generate',
+                step="2/5"
+            )
+        
+        except Exception as e:
+            update_pipeline_status(
+            pipeline_id=PIPELINE_ID,
+            status='failed',
+            task_name='t_generate',
+            notes=str(e),
+            step="2/5"
+        )
+        
+        finally:
+            return  {
+            'file_name': file_name,
+            'file_path': output_path,
+            'row_count': len(df),
+            'timestamp': timestamp
+            }
         
     @task
     def t_meta_data(file_info, elapsed_time, status, data_folder):
@@ -149,69 +191,127 @@ def orders_pipeline():
             
             with open(output_path, "w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=4, ensure_ascii=False)
-                
-            return {'metadata': metadata,'output_path': output_path, 'file_info': file_info }
+            
+            update_pipeline_status(
+                pipeline_id=PIPELINE_ID,
+                status='success',
+                task_name='t_meta_data',
+                step="4/5"
+            )
         
+            return {'metadata': metadata,'output_path': output_path, 'file_info': file_info }
+
         except Exception as e:
             print(f"An error was found while building the meta data {e}")
+            update_pipeline_status(
+                pipeline_id=PIPELINE_ID,
+                status='failed',
+                task_name='t_meta_data',
+                notes=str(e),
+                step="4/5"
+            )
             raise ValueError(f"Error while building the metadata for order {file_name}")
     
     @task
     def t_send_order_to_minio(file_info, target_bucket):
         
-        # Conectando ao MinIO
-        client = connect_minio()
+        try:
+            # Conectando ao MinIO
+            client = connect_minio()
+            
+            file_name = "orders_" + file_info["timestamp"]
+            
+            #csv_buffer = io.StringIO()
+            parquet_buffer = io.BytesIO()
+            
+            df = pd.read_parquet(file_info["file_path"])
+            df.to_parquet(parquet_buffer, engine='pyarrow', compression='snappy', index=False)
+            
+            content_bytes = parquet_buffer.getvalue()
+            extension = ".parquet"
+            
+            parquet_buffer.seek(0)
+            
+            byte_stream = io.BytesIO(content_bytes)
         
-        file_name = "orders_" + file_info["timestamp"]
-        
-        #csv_buffer = io.StringIO()
-        parquet_buffer = io.BytesIO()
-        
-        df = pd.read_parquet(file_info["file_path"])
-        df.to_parquet(parquet_buffer, engine='pyarrow', compression='snappy', index=False)
-        
-        content_bytes = parquet_buffer.getvalue()
-        extension = ".parquet"
-        
-        parquet_buffer.seek(0)
-        
-        byte_stream = io.BytesIO(content_bytes)
-    
-        client.put_object(
-            target_bucket,
-            f"{file_name}{extension}", 
-            byte_stream,
-            len(content_bytes)     
-        )
-        
-        return True
+            client.put_object(
+                target_bucket,
+                f"{file_name}{extension}", 
+                byte_stream,
+                len(content_bytes)     
+            )
+            
+            update_pipeline_status(
+                pipeline_id=PIPELINE_ID,
+                status='success',
+                task_name='t_send_order_to_minio',
+                step="3/5"
+            )
+        except Exception as e:
+            update_pipeline_status(
+                pipeline_id=PIPELINE_ID,
+                status='failed',
+                task_name='t_send_order_to_minio',
+                notes=str(e),
+                step="3/5"
+            )
+        finally:
+            return True
     
     @task
     def t_send_metadata_to_minio(target_bucket, meta_result):
         
-        output_path = meta_result['output_path']
-        file_info = meta_result['file_info'] 
-        file_name = "orders_" + file_info["timestamp"] + "_meta"
-        
-        # Conectando ao MinIO
-        client = connect_minio()
-        
-        with open(output_path, 'r', encoding='utf-8') as f:
-            json_data = json.load(f)
+        try:
+            output_path = meta_result['output_path']
+            file_info = meta_result['file_info'] 
+            file_name = "orders_" + file_info["timestamp"] + "_meta"
             
-        content_bytes = json.dumps(json_data, indent=2, ensure_ascii=False).encode("utf-8")
-        extension = ".json"
+            # Conectando ao MinIO
+            client = connect_minio()
+            
+            with open(output_path, 'r', encoding='utf-8') as f:
+                json_data = json.load(f)
+            
+            # print(f"DEBUG: Conteúdo completo do JSON = {json_data}")
+            # print(f"DEBUG: Chaves do JSON = {json_data.keys()}")
+            
+            # duration = json_data.get('metadata', {}).get('duration_seconds', 0)
+            # print(f"DEBUG: Duration do arquivo = {duration}")
+            
+            duration = json_data.get('duration_seconds', 0)
+            
+            content_bytes = json.dumps(json_data, indent=2, ensure_ascii=False).encode("utf-8")
+            extension = ".json"
+            
+            byte_stream = io.BytesIO(content_bytes)
         
-        byte_stream = io.BytesIO(content_bytes)
-    
-        client.put_object(
-            target_bucket,
-            f"{file_name}{extension}", 
-            byte_stream,
-            len(content_bytes)     
-        )
-    
-        return "upload_complete"
+            client.put_object(
+                target_bucket,
+                f"{file_name}{extension}", 
+                byte_stream,
+                len(content_bytes)     
+            )
+
+            update_pipeline_status(
+                pipeline_id=PIPELINE_ID,
+                status='success',
+                task_name='t_send_metadata_to_minio',
+                duration=duration,
+                step="5/5"
+            )
+            
+        except Exception as e:
+            update_pipeline_status(
+                pipeline_id=PIPELINE_ID,
+                status='failed',
+                task_name='t_send_metadata_to_minio',
+                duration=0,
+                notes=str(e),
+                step="5/5"
+            )
+            
+        finally:
+            return "upload_complete"
     
     @task
     def t_finish_timer(start, upload_status):
@@ -230,14 +330,7 @@ def orders_pipeline():
     meta_result = t_meta_data(file_info, elapsed_time, "success", DATA_FOLDER)
     
     t_send_metadata_to_minio(BUCKET, meta_result)
-    # # Enviar as ordens para o MinIO
-    # t_send_order_to_minio(file_info, BUCKET)
-    
-    # # Gerar os metadados
-    # elapsed_time = t_finish_timer(start)
-    # meta_result = t_meta_data(file_info, elapsed_time, "success", DATA_FOLDER)
-    # t_send_metadata_to_minio(file_info, BUCKET, meta_result)
 
 orders_pipeline()
-# Quebrar a pipeline em tasks (atualmente tem só 1 task)
+
 # Adicionar a task de atualizar o banco de dados por procedure (exemplo de status - uploading to Minio, uploading to BigQuery )
